@@ -13,6 +13,7 @@ import * as pdfParseModule from "pdf-parse";
 // import { encoding_for_model } from '@dqbd/tiktoken';
 import { Tiktoken } from "js-tiktoken/lite";
 import o200k_base from "js-tiktoken/ranks/o200k_base";
+import cors from "cors";
 
 
 // Configure multer for file uploads
@@ -25,6 +26,13 @@ const upload = multer({
 
 export async function registerRoutes(app: Express): Promise<Server> {
   
+  // ✅ Enable CORS for all origins
+  app.use(cors({
+    origin: "*", // or replace "*" with your frontend domain for better security
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+  }));
+
   // ==========================================
   // AI TOOLS API ENDPOINTS
   // ==========================================
