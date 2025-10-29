@@ -1,9 +1,14 @@
-import { type User, type InsertUser, type Contact, type InsertContact, type Newsletter, type InsertNewsletter } from "@shared/schema";
 import { randomUUID } from "crypto";
+import {
+  type User,
+  type InsertUser,
+  type Contact,
+  type InsertContact,
+  type Newsletter,
+  type InsertNewsletter,
+} from "../shared/schema.js";
 
-// modify the interface with any CRUD methods
-// you might need
-
+// Modify the interface with any CRUD methods you might need
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
@@ -26,35 +31,49 @@ export class MemStorage implements IStorage {
     this.newsletters = new Map();
   }
 
-  // User methods
+  // ---------------- USER METHODS ----------------
+
   async getUser(id: string): Promise<User | undefined> {
     return this.users.get(id);
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
     return Array.from(this.users.values()).find(
-      (user) => user.username === username,
+      (user) => user.username === username
     );
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
     const id = randomUUID();
-    const user: User = { ...insertUser, id };
+
+    // Ensure all required User fields exist
+    const user: User = {
+      id,
+      username: insertUser.username,
+      password: insertUser.password,
+    };
+
     this.users.set(id, user);
     return user;
   }
 
-  // Contact methods
+  // ---------------- CONTACT METHODS ----------------
+
   async insertContact(insertContact: InsertContact): Promise<Contact> {
     const id = randomUUID();
-    const contact: Contact = { 
-      ...insertContact,
-      company: insertContact.company || null, 
-      id, 
-      createdAt: new Date() 
+
+    // Fill all required fields explicitly
+    const contact: Contact = {
+      id,
+      name: insertContact.name,
+      email: insertContact.email,
+      message: insertContact.message,
+      company: insertContact.company ?? "",
+      createdAt: new Date(),
     };
+
     this.contacts.set(id, contact);
-    console.log(`Contact stored: ${contact.name} (${contact.email})`);
+    console.log(`✅ Contact stored: ${contact.name} (${contact.email})`);
     return contact;
   }
 
@@ -64,22 +83,26 @@ export class MemStorage implements IStorage {
     );
   }
 
-  // Newsletter methods
+  // ---------------- NEWSLETTER METHODS ----------------
+
   async insertNewsletter(insertNewsletter: InsertNewsletter): Promise<Newsletter> {
     const id = randomUUID();
-    const newsletter: Newsletter = { 
-      ...insertNewsletter, 
-      id, 
-      createdAt: new Date() 
+
+    // Ensure all required Newsletter fields exist
+    const newsletter: Newsletter = {
+      id,
+      email: insertNewsletter.email,
+      createdAt: new Date(),
     };
+
     this.newsletters.set(id, newsletter);
-    console.log(`Newsletter subscription: ${newsletter.email}`);
+    console.log(`📧 Newsletter subscription: ${newsletter.email}`);
     return newsletter;
   }
 
   async getNewsletterByEmail(email: string): Promise<Newsletter | undefined> {
     return Array.from(this.newsletters.values()).find(
-      (newsletter) => newsletter.email === email,
+      (newsletter) => newsletter.email === email
     );
   }
 

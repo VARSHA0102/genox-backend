@@ -1,9 +1,11 @@
 import express, { type Request, Response, NextFunction } from "express";
-import { registerRoutes } from "./routes";
-import { setupVite, serveStatic, log } from "./vite";
+import { registerRoutes } from "./routes.js";
+import { setupVite, serveStatic, log } from "./vite.js";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createServer as createHttpServer, type Server as HttpServer } from "http";
+import type { Server } from "http";
+
 
 const app = express();
 app.use(express.json());

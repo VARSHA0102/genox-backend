@@ -7,8 +7,9 @@ import { promises as fs } from "fs";
 import mammoth from "mammoth";
 import path from "path";
 import { storage } from "./storage.js";
-import { sendContactEmail, sendWelcomeEmail } from "./emailService";
-import { insertContactSchema, insertNewsletterSchema } from "../shared/schema";
+import { sendContactEmail, sendWelcomeEmail } from "./emailService.js";
+import { insertContactSchema, insertNewsletterSchema } from "../shared/schema.js";
+import * as pdfParseModule from "pdf-parse";
 // import { encoding_for_model } from '@dqbd/tiktoken';
 import { Tiktoken } from "js-tiktoken/lite";
 import o200k_base from "js-tiktoken/ranks/o200k_base";
@@ -352,8 +353,8 @@ app.post("/api/tools/embed", async (req, res) => {
         try {
           if (file.mimetype === 'application/pdf') {
             // Dynamically import pdf-parse to avoid initialization issues
-            const pdfParse = (await import('pdf-parse')).default;
-            const dataBuffer = await fs.readFile(file.path);
+            const pdfParse = (pdfParseModule as any).default || pdfParseModule;
+            const dataBuffer = req.file?.buffer || req.body?.fileBuffer;
             const pdfData = await pdfParse(dataBuffer);
             documentText = pdfData.text;
           } else if (file.mimetype.includes('word')) {

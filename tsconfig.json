@@ -1,19 +1,20 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "noEmit": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
     "types": ["node"],
-    "baseUrl": "./src",
+    "rootDir": ".",
+    "outDir": "./dist",
+    "baseUrl": "./",
     "paths": {
-      "@shared/*": ["../shared/*"]
-    },
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext"
+      "@shared/*": ["shared/*"]
+    }
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "shared/**/*"],
   "exclude": ["node_modules", "dist"]
 }
