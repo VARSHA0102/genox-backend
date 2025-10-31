@@ -1,4 +1,5 @@
 import express, { type Request, Response, NextFunction } from "express";
+import cors from "cors";
 import { registerRoutes } from "./routes.js";
 import { setupVite, serveStatic, log } from "./vite.js";
 import path from "path";
@@ -10,6 +11,23 @@ import type { Server } from "http";
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+
+// Allow browser clients from frontend origin in production, or all origins when not set.
+// ensure CORS returns the correct headers for preflight and requests
+app.use(cors({
+  origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : true,
+  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization","Accept", "X-Requested-With"],
+  credentials: true,
+}));
+
+// also explicitly answer OPTIONS preflight for all routes
+app.options("*", cors({
+  origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : true,
+  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization","Accept", "X-Requested-With"],
+  credentials: true,
+}));
 
 app.use((req, res, next) => {
   const start = Date.now();
