@@ -6,15 +6,13 @@ import { fileURLToPath } from "url";
 import { createServer as createHttpServer, type Server as HttpServer } from "http";
 import type { Server } from "http";
 
-
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// --- replace existing cors setup with this robust handler ---
+// --- CORS setup ---
 import cors from "cors";
 
-// compute allowed origins from env (comma-separated) — empty => allow all
 const rawOrigins = process.env.CORS_ORIGIN ?? "";
 const allowedOrigins = rawOrigins
   .split(",")
@@ -23,7 +21,6 @@ const allowedOrigins = rawOrigins
 
 const corsOptions = {
   origin: (requestOrigin: string | undefined, callback: (err: any, allow?: boolean) => void) => {
-    // allow non-browser requests (no origin) and allow all when no env specified
     if (!requestOrigin || allowedOrigins.length === 0 || allowedOrigins.includes("*")) {
       return callback(null, true);
     }
@@ -39,21 +36,9 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // ✅ handle preflight requests
 
-// explicit fallback that always sets the common CORS headers for matching origins
-app.use((req, res, next) => {
-  const requestOrigin = req.headers.origin as string | undefined;
-  if (!requestOrigin) return next();
-  if (allowedOrigins.length === 0 || allowedOrigins.includes("*") || allowedOrigins.includes(requestOrigin)) {
-    res.setHeader("Access-Control-Allow-Origin", allowedOrigins.length === 0 || allowedOrigins.includes("*") ? "*" : requestOrigin);
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,Accept,X-Requested-With");
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-  }
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
+// --- Logging middleware ---
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
@@ -72,11 +57,9 @@ app.use((req, res, next) => {
       if (capturedJsonResponse) {
         logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
       }
-
       if (logLine.length > 80) {
         logLine = logLine.slice(0, 79) + "…";
       }
-
       log(logLine);
     }
   });
@@ -86,30 +69,24 @@ app.use((req, res, next) => {
 
 (async () => {
   const server = await registerRoutes(app);
-
   console.log("registerRoutes returned:", server && (server.constructor?.name || typeof server));
-  // If registerRoutes returned an already-listening Server, don't call listen again.
+
   const port = parseInt(process.env.PORT || "5000", 10);
-  // declare httpServer in this outer scope so both branches can assign it
   let httpServer: HttpServer;
 
-  // Attach error handler BEFORE calling listen so EADDRINUSE doesn't crash the process
   const attachListenHandler = (srv: HttpServer) => {
     srv.on("error", (err: any) => {
       if (err && err.code === "EADDRINUSE") {
         console.error(`Port ${port} in use. If you started the server twice, stop the other instance or set PORT to a different value.`);
       } else {
-        // rethrow so it can be logged by existing handlers
         throw err;
       }
-      
     });
   };
 
   if (server && typeof (server as any).listen === "function") {
     const s = server as unknown as HttpServer & { listening?: boolean; address?: () => any };
     attachListenHandler(s);
-    // some Server implementations may not expose .listening; check address() instead
     try {
       const addr = typeof s.address === "function" ? s.address() : null;
       if (!addr) {
@@ -133,7 +110,6 @@ app.use((req, res, next) => {
     httpServer = fallback;
   }
 
-  // add process event handlers to surface why the process might exit
   process.on("exit", (code) => {
     console.log("process exit event, code =", code);
   });
@@ -148,35 +124,21 @@ app.use((req, res, next) => {
     console.error("unhandledRejection:", reason);
   });
 
-  // OPTIONAL (temporary) keep-alive for debugging — remove when root cause found
-  // const _keepAlive = setInterval(() => {}, 1_000_000);
-
-  // importantly only setup vite in development and after
-  // setting up all the other routes so the catch-all route
-  // doesn't interfere with the other routes
   if (app.get("env") === "development") {
     try {
-      // pass the actual http.Server that is listening to Vite for HMR
       await setupVite(app, httpServer as unknown as Server);
       console.log("Vite middleware set up (development).");
     } catch (err) {
       console.error("Error while setting up Vite (development):", err);
-      // do not exit — server is already listening, keep running so you can inspect logs
     }
   } else {
-    // production: serve built assets from dist and only then fallback to index.html
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = path.dirname(__filename);
     const clientDist = path.resolve(__dirname, "../dist");
 
-    // serve static assets first (express sets correct Content-Type)
     app.use(express.static(clientDist, { maxAge: "1y", index: false }));
-
-    // SPA fallback AFTER static middleware
     app.get("*", (_req, res) => {
       res.sendFile(path.join(clientDist, "index.html"));
     });
   }
-
-  // server already started above
 })();
