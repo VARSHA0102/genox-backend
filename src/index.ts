@@ -1,5 +1,4 @@
 import express, { type Request, Response, NextFunction } from "express";
-import cors from "cors";
 import { registerRoutes } from "./routes.js";
 import { setupVite, serveStatic, log } from "./vite.js";
 import path from "path";
@@ -12,22 +11,48 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// Allow browser clients from frontend origin in production, or all origins when not set.
-// ensure CORS returns the correct headers for preflight and requests
-app.use(cors({
-  origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : true,
-  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization","Accept", "X-Requested-With"],
-  credentials: true,
-}));
+// --- replace existing cors setup with this robust handler ---
+import cors from "cors";
 
-// also explicitly answer OPTIONS preflight for all routes
-app.options("*", cors({
-  origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : true,
-  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization","Accept", "X-Requested-With"],
+// compute allowed origins from env (comma-separated) — empty => allow all
+const rawOrigins = process.env.CORS_ORIGIN ?? "";
+const allowedOrigins = rawOrigins
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin: (requestOrigin: string | undefined, callback: (err: any, allow?: boolean) => void) => {
+    // allow non-browser requests (no origin) and allow all when no env specified
+    if (!requestOrigin || allowedOrigins.length === 0 || allowedOrigins.includes("*")) {
+      return callback(null, true);
+    }
+    if (allowedOrigins.includes(requestOrigin)) {
+      return callback(null, true);
+    }
+    return callback(null, false);
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
   credentials: true,
-}));
+  optionsSuccessStatus: 200,
+};
+
+app.use(cors(corsOptions));
+
+// explicit fallback that always sets the common CORS headers for matching origins
+app.use((req, res, next) => {
+  const requestOrigin = req.headers.origin as string | undefined;
+  if (!requestOrigin) return next();
+  if (allowedOrigins.length === 0 || allowedOrigins.includes("*") || allowedOrigins.includes(requestOrigin)) {
+    res.setHeader("Access-Control-Allow-Origin", allowedOrigins.length === 0 || allowedOrigins.includes("*") ? "*" : requestOrigin);
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,Accept,X-Requested-With");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  }
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
 
 app.use((req, res, next) => {
   const start = Date.now();
