@@ -19,14 +19,17 @@ const allowedOrigins = rawOrigins
   .map((s) => s.trim())
   .filter(Boolean);
 
+// ✅ Step 1: Log origin resolution for debugging
 const corsOptions = {
   origin: (requestOrigin: string | undefined, callback: (err: any, allow?: boolean) => void) => {
+    console.log("CORS preflight from:", requestOrigin);
     if (!requestOrigin || allowedOrigins.length === 0 || allowedOrigins.includes("*")) {
       return callback(null, true);
     }
     if (allowedOrigins.includes(requestOrigin)) {
       return callback(null, true);
     }
+    console.warn("Blocked CORS origin:", requestOrigin);
     return callback(null, false);
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -35,8 +38,26 @@ const corsOptions = {
   optionsSuccessStatus: 200,
 };
 
+// ✅ Step 2: Apply CORS middleware globally
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // ✅ handle preflight requests
+app.options("*", cors(corsOptions)); // handle preflight requests
+
+// ✅ Step 3: Manual fallback for OPTIONS (guarantees headers)
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  }
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
 
 // --- Logging middleware ---
 app.use((req, res, next) => {
