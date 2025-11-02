@@ -1,90 +1,115 @@
 import { createServer } from "http";
 import multer from "multer";
-import { promises as fs } from "fs";
-import mammoth from "mammoth";
-import { storage } from "./storage.js";
-import { sendContactEmail, sendWelcomeEmail } from "./emailService.js";
-import { insertContactSchema, insertNewsletterSchema } from "../shared/schema.js";
-import * as pdfParseModule from "pdf-parse";
-// import { encoding_for_model } from '@dqbd/tiktoken';
 import { Tiktoken } from "js-tiktoken/lite";
 import o200k_base from "js-tiktoken/ranks/o200k_base";
+import cors from "cors";
+import fs from "fs/promises";
+import { sendContactEmail, sendWelcomeEmail } from "./emailService.js";
+import { insertContactSchema, insertNewsletterSchema } from "../shared/schema.js";
+import { storage } from "./storage.js";
 // Configure multer for file uploads
 const upload = multer({
-    dest: 'uploads/',
+    dest: "uploads/",
     limits: {
         fileSize: 10 * 1024 * 1024, // 10MB limit
     },
 });
+// compute allowed origins from env (comma-separated) — empty => allow all
+const rawOrigins = process.env.CORS_ORIGIN ?? "";
+const allowedOrigins = rawOrigins.split(",").map((s) => s.trim()).filter(Boolean);
+const corsOptions = {
+    origin: (requestOrigin, callback) => {
+        // allow non-browser requests (no Origin) and allow all when no env specified
+        if (!requestOrigin || allowedOrigins.length === 0 || allowedOrigins.includes("*")) {
+            return callback(null, true);
+        }
+        if (allowedOrigins.includes(requestOrigin)) {
+            return callback(null, true);
+        }
+        return callback(null, false);
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+    credentials: true,
+    optionsSuccessStatus: 200,
+};
 export async function registerRoutes(app) {
+    // Use global CORS middleware (index.ts should already apply global CORS)
+    app.use(cors(corsOptions));
     // ==========================================
     // AI TOOLS API ENDPOINTS
     // ==========================================
-    // 1. TOKENIZATION TOOL
-    app.post('/api/tools/tokenize', async (req, res) => {
+    // TOKENIZATION TOOL
+    app.options("/api/tools/tokenize", cors(corsOptions));
+    app.post("/api/tools/tokenize", cors(corsOptions), async (req, res) => {
         try {
             const { text } = req.body;
-            if (!text || typeof text !== 'string') {
-                return res.status(400).json({ error: 'Text is required and must be a string' });
+            if (!text || typeof text !== "string") {
+                return res.status(400).json({ error: "Text is required and must be a string" });
             }
-            // Initialize encoder
             const encoder = new Tiktoken(o200k_base);
             const tokenIds = encoder.encode(text);
             const tokens = tokenIds.map((id, i) => ({
                 index: i + 1,
                 token: encoder.decode([id]),
-                id
+                id,
             }));
             const result = {
                 original_text: text,
-                model: 'gpt-4o',
+                model: "gpt-4o",
                 token_count: tokenIds.length,
                 tokens,
                 statistics: {
-                    avg_token_length: tokens.reduce((sum, t) => sum + t.token.length, 0) / tokens.length,
-                    unique_tokens: [...new Set(tokens.map(t => t.token))].length,
+                    avg_token_length: tokens.length ? tokens.reduce((sum, t) => sum + t.token.length, 0) / tokens.length : 0,
+                    unique_tokens: [...new Set(tokens.map((t) => t.token))].length,
                     character_count: text.length,
-                    word_count: text.trim().split(/\s+/).filter(Boolean).length
-                }
+                    word_count: text.trim().split(/\s+/).filter(Boolean).length,
+                },
             };
             res.json({ success: true, result });
         }
         catch (error) {
-            console.error('Tokenization error:', error);
-            res.status(500).json({ error: error.message || 'Failed to tokenize text' });
+            console.error("Tokenization error:", error);
+            res.status(500).json({ error: error.message || "Failed to tokenize text" });
         }
     });
-    // 2. CHUNKING TOOL
-    app.post("/api/tools/chunk", async (req, res) => {
+    // CHUNKING TOOL (TOKEN-BASED)
+    app.options("/api/tools/chunk", cors(corsOptions));
+    app.post("/api/tools/chunk", cors(corsOptions), async (req, res) => {
         try {
-            const { text, chunk_size, overlap = 0 } = req.body;
-            if (!text || !chunk_size) {
-                return res.status(400).json({ error: "Text and chunk_size are required" });
+            const { text } = req.body ?? {};
+            const chunk_size_raw = req.body?.chunk_size ?? req.body?.size ?? "1000";
+            const overlap_raw = req.body?.overlap ?? 0;
+            if (!text || typeof text !== "string") {
+                return res.status(400).json({ error: "Text is required and must be a string" });
             }
-            const chunkSizeNum = parseInt(chunk_size);
-            const overlapNum = parseInt(overlap) || 0;
-            if (chunkSizeNum <= 0) {
-                return res.status(400).json({ error: "Chunk size must be positive" });
-            }
+            const chunkSizeNum = Math.max(1, parseInt(String(chunk_size_raw), 10) || 1000);
+            let overlapNum = Math.max(0, parseInt(String(overlap_raw), 10) || 0);
+            if (overlapNum >= chunkSizeNum)
+                overlapNum = Math.max(0, Math.floor(chunkSizeNum / 2));
+            // --- Tokenize text ---
             const encoder = new Tiktoken(o200k_base);
             const tokenIds = encoder.encode(text);
             const chunks = [];
-            let start = 0;
-            while (start < tokenIds.length) {
+            // step = number of new tokens added per chunk (with overlap)
+            const step = Math.max(1, chunkSizeNum - overlapNum);
+            for (let start = 0, idx = 0; start < tokenIds.length; start += step, idx++) {
                 const end = Math.min(start + chunkSizeNum, tokenIds.length);
                 const chunkTokenIds = tokenIds.slice(start, end);
                 const chunkText = encoder.decode(chunkTokenIds);
                 chunks.push({
-                    index: chunks.length + 1,
+                    index: idx + 1,
                     content: chunkText,
-                    length: chunkText.length,
                     token_count: chunkTokenIds.length,
                     start_token_index: start,
                     end_token_index: end - 1,
-                    word_count: chunkText.trim().split(/\s+/).filter(Boolean).length
+                    length: chunkText.length,
+                    word_count: chunkText.trim().split(/\s+/).filter(Boolean).length,
                 });
-                start = Math.max(start + chunkSizeNum - overlapNum, start + 1);
+                if (end >= tokenIds.length)
+                    break;
             }
+            // --- Build response ---
             const result = {
                 original_text: text,
                 chunk_size: chunkSizeNum,
@@ -94,22 +119,32 @@ export async function registerRoutes(app) {
                 statistics: {
                     total_characters: text.length,
                     total_tokens: tokenIds.length,
-                    avg_chunk_length: chunks.reduce((sum, c) => sum + c.length, 0) / chunks.length,
-                    avg_tokens_per_chunk: chunks.reduce((sum, c) => sum + c.token_count, 0) / chunks.length,
-                    coverage_percentage: (chunks.map(c => c.content).join('').length / text.length) * 100
-                }
+                    avg_chunk_length: chunks.length > 0
+                        ? chunks.reduce((sum, c) => sum + c.length, 0) / chunks.length
+                        : 0,
+                    avg_tokens_per_chunk: chunks.length > 0
+                        ? chunks.reduce((sum, c) => sum + c.token_count, 0) / chunks.length
+                        : 0,
+                    coverage_percentage: text.length > 0
+                        ? (chunks.map((c) => c.content).join("").length / text.length) * 100
+                        : 0,
+                },
             };
             res.json({ success: true, result });
         }
         catch (error) {
-            console.error('Chunking error:', error);
-            res.status(500).json({ error: "Failed to chunk text" });
+            console.error("Chunking error:", error);
+            res.status(500).json({ error: error.message || "Failed to chunk text" });
         }
     });
     // 3. AI ASSISTANT TOOL
-    app.post("/api/tools/chat", async (req, res) => {
+    app.options("/api/tools/chat", cors(corsOptions));
+    app.post("/api/tools/chat", cors(corsOptions), async (req, res) => {
         try {
-            const { groq_api_key, message, model = "llama-3.1-8b-instant" } = req.body;
+            const { groq_api_key, message } = req.body;
+            // Trim and validate model input
+            const modelRaw = req.body?.model ?? "llama-3.1-8b-instant";
+            const model = String(modelRaw).trim() || "llama-3.1-8b-instant";
             if (!groq_api_key || !message) {
                 return res.status(400).json({ error: "Groq API key and message are required" });
             }
@@ -117,30 +152,30 @@ export async function registerRoutes(app) {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "Authorization": `Bearer ${groq_api_key}`
+                    "Authorization": `Bearer ${groq_api_key}`,
                 },
                 body: JSON.stringify({
                     model,
                     messages: [
                         {
                             role: "system",
-                            content: "You are a helpful AI assistant created by GenOrcasX. Provide clear, accurate, and helpful responses."
+                            content: "You are a helpful AI assistant created by GenOrcasX. Provide clear, accurate, and helpful responses.",
                         },
                         {
                             role: "user",
-                            content: message
-                        }
+                            content: message,
+                        },
                     ],
                     temperature: 0.7,
-                    max_tokens: 1000
-                })
+                    max_tokens: 1000,
+                }),
             });
             if (!response.ok) {
                 const error = await response.text();
                 throw new Error(`Groq API error: ${error}`);
             }
             const data = await response.json();
-            const assistantMessage = data.choices[0]?.message?.content;
+            const assistantMessage = data.choices?.[0]?.message?.content ?? "";
             const result = {
                 model_used: model,
                 user_message: message,
@@ -148,27 +183,28 @@ export async function registerRoutes(app) {
                 tokens_used: data.usage?.total_tokens || 0,
                 timestamp: new Date().toISOString(),
                 metadata: {
-                    finish_reason: data.choices[0]?.finish_reason,
+                    finish_reason: data.choices?.[0]?.finish_reason,
                     prompt_tokens: data.usage?.prompt_tokens,
-                    completion_tokens: data.usage?.completion_tokens
-                }
+                    completion_tokens: data.usage?.completion_tokens,
+                },
             };
             res.json({ success: true, result });
         }
         catch (error) {
-            console.error('Chat error:', error);
+            console.error("Chat error:", error);
             res.status(500).json({ error: error.message || "Failed to process chat request" });
         }
     });
     // 4. EMBEDDING TOOL
-    app.post("/api/tools/embed", async (req, res) => {
+    app.options("/api/tools/embed", cors(corsOptions));
+    app.post("/api/tools/embed", cors(corsOptions), async (req, res) => {
         try {
             const { text, model, dimensions, apikey } = req.body;
-            if (!text || !model?.trim()) {
+            if (!text || !(model && String(model).trim())) {
                 return res.status(400).json({ error: "Text and model are required" });
             }
             // Use real embedding if API key is provided
-            if (apikey?.trim()) {
+            if (apikey && String(apikey).trim()) {
                 const selectedModel = model;
                 const response = await fetch("https://api.openai.com/v1/embeddings", {
                     method: "POST",
@@ -179,15 +215,15 @@ export async function registerRoutes(app) {
                     body: JSON.stringify({
                         input: text,
                         model: selectedModel,
-                        ...(dimensions ? { dimensions: parseInt(dimensions) } : {}),
+                        ...(dimensions ? { dimensions: parseInt(String(dimensions), 10) } : {}),
                     }),
                 });
                 if (!response.ok) {
                     const errorText = await response.text();
                     return res.status(response.status).json({ error: `OpenAI error: ${errorText}` });
                 }
-                const result = await response.json();
-                const embedding = result.data?.[0]?.embedding;
+                const resultJson = await response.json();
+                const embedding = resultJson.data?.[0]?.embedding ?? [];
                 return res.json({
                     success: true,
                     result: {
@@ -200,14 +236,15 @@ export async function registerRoutes(app) {
                             word_count: text.split(/\s+/).length,
                             vector_magnitude: Math.sqrt(embedding.reduce((sum, val) => sum + val * val, 0)),
                             min_value: Math.min(...embedding),
-                            max_value: Math.max(...embedding)
+                            max_value: Math.max(...embedding),
                         },
-                        note: "This is a real embedding from OpenAI."
-                    }
+                        note: "This is a real embedding from OpenAI.",
+                    },
                 });
             }
             // Fallback: mock embedding
-            const mockEmbedding = Array.from({ length: dimensions || 1536 }, () => Math.random() * 2 - 1);
+            const dim = dimensions ? parseInt(String(dimensions), 10) : 1536;
+            const mockEmbedding = Array.from({ length: dim }, () => Math.random() * 2 - 1);
             const result = {
                 text,
                 model_used: model,
@@ -218,9 +255,9 @@ export async function registerRoutes(app) {
                     word_count: text.split(/\s+/).length,
                     vector_magnitude: Math.sqrt(mockEmbedding.reduce((sum, val) => sum + val * val, 0)),
                     min_value: Math.min(...mockEmbedding),
-                    max_value: Math.max(...mockEmbedding)
+                    max_value: Math.max(...mockEmbedding),
                 },
-                note: "This is a demo embedding. Provide OpenAI API key for real embeddings."
+                note: "This is a demo embedding. Provide OpenAI API key for real embeddings.",
             };
             res.json({ success: true, result });
         }
@@ -230,18 +267,18 @@ export async function registerRoutes(app) {
         }
     });
     // 5. EVALUATION TOOL
-    app.post("/api/tools/evaluate", async (req, res) => {
+    app.options("/api/tools/evaluate", cors(corsOptions));
+    app.post("/api/tools/evaluate", cors(corsOptions), async (req, res) => {
         try {
             const { model_responses, ground_truth, metrics = "basic" } = req.body;
             if (!model_responses) {
                 return res.status(400).json({ error: "Model responses are required" });
             }
-            const responses = model_responses.split('\n').filter(r => r.trim());
-            const truths = ground_truth ? ground_truth.split('\n').filter(r => r.trim()) : [];
-            // Basic text evaluation metrics
+            const responses = String(model_responses).split('\n').filter(r => r.trim());
+            const truths = ground_truth ? String(ground_truth).split('\n').filter(r => r.trim()) : [];
             const evaluation = {
                 response_count: responses.length,
-                avg_response_length: responses.reduce((sum, r) => sum + r.length, 0) / responses.length,
+                avg_response_length: responses.length ? responses.reduce((sum, r) => sum + r.length, 0) / responses.length : 0,
                 total_words: responses.reduce((sum, r) => sum + r.split(/\s+/).length, 0),
                 unique_words: [...new Set(responses.join(' ').split(/\s+/))].length,
                 readability_scores: responses.map((response, index) => {
@@ -253,7 +290,7 @@ export async function registerRoutes(app) {
                         word_count: words,
                         sentence_count: sentences,
                         avg_words_per_sentence: avgWordsPerSentence,
-                        readability_grade: Math.max(1, Math.min(12, avgWordsPerSentence - 5)) // Simplified formula
+                        readability_grade: Math.max(1, Math.min(12, Math.round(avgWordsPerSentence - 5))) // simplified
                     };
                 }),
                 similarity_analysis: truths.length > 0 ? responses.map((response, index) => {
@@ -264,32 +301,28 @@ export async function registerRoutes(app) {
                     const union = new Set([...responseWords, ...truthWords]);
                     return {
                         response_index: index + 1,
-                        jaccard_similarity: intersection.size / union.size,
+                        jaccard_similarity: union.size ? intersection.size / union.size : 0,
                         common_words: intersection.size,
-                        response_unique_words: responseWords.size - intersection.size,
-                        truth_unique_words: truthWords.size - intersection.size
+                        response_unique_words: Math.max(0, responseWords.size - intersection.size),
+                        truth_unique_words: Math.max(0, truthWords.size - intersection.size)
                     };
                 }) : null,
                 overall_score: {
-                    consistency: responses.length > 1 ?
-                        1 - (new Set(responses).size / responses.length) : 1, // How similar responses are
-                    completeness: Math.min(1, responses.join('').length / 1000), // Arbitrary completeness metric
-                    relevance: truths.length > 0 ?
-                        responses.reduce((sum, resp, idx) => {
-                            const truth = truths[idx] || truths[0];
-                            return sum + (resp.length > 0 && truth.length > 0 ? 0.8 : 0.3);
-                        }, 0) / responses.length : 0.7
+                    consistency: responses.length > 1 ? 1 - (new Set(responses).size / responses.length) : 1,
+                    completeness: Math.min(1, responses.join('').length / 1000),
+                    relevance: truths.length > 0 ? responses.reduce((sum, resp, idx) => sum + (resp.length > 0 && (truths[idx] || truths[0]).length > 0 ? 0.8 : 0.3), 0) / responses.length : 0.7
                 }
             };
             res.json({ success: true, result: evaluation });
         }
         catch (error) {
-            console.error('Evaluation error:', error);
+            console.error("Evaluation error:", error);
             res.status(500).json({ error: "Failed to evaluate responses" });
         }
     });
     // 6. RAG TOOL
-    app.post("/api/tools/rag", upload.single('file'), async (req, res) => {
+    app.options("/api/tools/rag", cors(corsOptions));
+    app.post("/api/tools/rag", cors(corsOptions), upload.single("file"), async (req, res) => {
         try {
             const { groq_api_key, openai_embed_key, query } = req.body;
             const file = req.file;
@@ -298,71 +331,76 @@ export async function registerRoutes(app) {
             }
             let documentText = "";
             if (file) {
-                // Extract text from uploaded file
                 try {
-                    if (file.mimetype === 'application/pdf') {
-                        // Dynamically import pdf-parse to avoid initialization issues
-                        const pdfParse = pdfParseModule.default || pdfParseModule;
-                        const dataBuffer = req.file?.buffer || req.body?.fileBuffer;
+                    if (file.mimetype === "application/pdf") {
+                        // ✅ FIX: Properly import pdf-parse (no .default)
+                        const { default: pdfParse } = await import('pdf-parse');
+                        const dataBuffer = await fs.readFile(file.path);
                         const pdfData = await pdfParse(dataBuffer);
-                        documentText = pdfData.text;
+                        documentText = pdfData.text || "";
                     }
-                    else if (file.mimetype.includes('word')) {
+                    else if (file.mimetype.includes("word") ||
+                        file.originalname?.match(/\.(docx|doc)$/i)) {
+                        // ✅ FIX: Mammoth import also normalized
+                        const mammothModule = await import("mammoth");
+                        const mammoth = mammothModule.default || mammothModule;
                         const result = await mammoth.extractRawText({ path: file.path });
-                        documentText = result.value;
+                        documentText = result?.value || "";
                     }
                     else {
-                        // Assume text file
-                        documentText = await fs.readFile(file.path, 'utf-8');
+                        // Plain text or other supported types
+                        documentText = await fs.readFile(file.path, "utf-8");
                     }
-                    // Clean up uploaded file
-                    await fs.unlink(file.path);
+                    // cleanup temporary uploaded file
+                    await fs.unlink(file.path).catch(() => { });
                 }
                 catch (fileError) {
-                    console.error('File processing error:', fileError);
-                    documentText = "Sample document content for demonstration. Upload a real document for actual processing.";
+                    console.error("File processing error:", fileError);
+                    documentText =
+                        "Sample document content for demonstration. Upload a real document for actual processing.";
                 }
             }
             else {
-                documentText = "No document provided. This is a sample RAG response using the query alone.";
+                documentText =
+                    "No document provided. This is a sample RAG response using the query alone.";
             }
-            // Simple chunking for RAG
+            // --- Simple chunking for RAG ---
             const chunks = [];
             const chunkSize = 1000;
             for (let i = 0; i < documentText.length; i += chunkSize) {
                 chunks.push(documentText.slice(i, i + chunkSize));
             }
-            // For demo, select first few chunks as "relevant"
             const relevantChunks = chunks.slice(0, 3);
-            const context = relevantChunks.join('\n\n');
-            // Generate response using Groq
+            const context = relevantChunks.join("\n\n");
+            // --- Query Groq LLM ---
             const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "Authorization": `Bearer ${groq_api_key}`
+                    Authorization: `Bearer ${groq_api_key}`,
                 },
                 body: JSON.stringify({
                     model: "llama-3.1-8b-instant",
                     messages: [
                         {
                             role: "system",
-                            content: "You are a helpful assistant. Answer the user's question based on the provided context. If the context doesn't contain relevant information, say so clearly."
+                            content: "You are a helpful assistant. Answer the user's question based on the provided context. If the context doesn't contain relevant information, say so clearly.",
                         },
                         {
                             role: "user",
-                            content: `Context:\n${context}\n\nQuestion: ${query}\n\nPlease answer based on the provided context.`
-                        }
+                            content: `Context:\n${context}\n\nQuestion: ${query}\n\nPlease answer based on the provided context.`,
+                        },
                     ],
                     temperature: 0.3,
-                    max_tokens: 800
-                })
+                    max_tokens: 800,
+                }),
             });
             if (!response.ok) {
                 throw new Error(`Groq API error: ${await response.text()}`);
             }
             const data = await response.json();
-            const answer = data.choices[0]?.message?.content;
+            const answer = data.choices?.[0]?.message?.content ?? "";
+            // --- Build final structured response ---
             const result = {
                 query,
                 document_info: {
@@ -370,12 +408,12 @@ export async function registerRoutes(app) {
                     size: file?.size || 0,
                     type: file?.mimetype || "unknown",
                     text_length: documentText.length,
-                    chunks_created: chunks.length
+                    chunks_created: chunks.length,
                 },
                 relevant_chunks: relevantChunks.map((chunk, index) => ({
                     index: index + 1,
                     content: chunk.substring(0, 200) + (chunk.length > 200 ? "..." : ""),
-                    full_content: chunk
+                    full_content: chunk,
                 })),
                 answer,
                 metadata: {
@@ -383,21 +421,28 @@ export async function registerRoutes(app) {
                     tokens_used: data.usage?.total_tokens || 0,
                     retrieval_method: "simple_chunking",
                     context_length: context.length,
-                    timestamp: new Date().toISOString()
-                }
+                    timestamp: new Date().toISOString(),
+                },
             };
             res.json({ success: true, result });
         }
         catch (error) {
-            console.error('RAG error:', error);
-            res.status(500).json({ error: error.message || "Failed to process RAG request" });
+            console.error("RAG error:", error);
+            res
+                .status(500)
+                .json({ error: error.message || "Failed to process RAG request" });
         }
     });
     // ==========================================
     // CONTACT FORM & NEWSLETTER ENDPOINTS
     // ==========================================
+    // ...existing code...
+    // (keep contact/newsletter handlers as they were)
+    // ...existing code...
+    // CONTACT FORM
+    app.options("/api/contact", cors(corsOptions));
     // Contact form submission
-    app.post("/api/contact", async (req, res) => {
+    app.post("/api/contact", cors(corsOptions), async (req, res) => {
         try {
             // Validate input data
             const validatedData = insertContactSchema.parse(req.body);
@@ -433,8 +478,10 @@ export async function registerRoutes(app) {
             res.status(500).json({ error: "Failed to submit contact form" });
         }
     });
+    // NEWSLETTER SUBSCRIPTION
+    app.options("/api/newsletter", cors(corsOptions));
     // Newsletter subscription
-    app.post("/api/newsletter", async (req, res) => {
+    app.post("/api/newsletter", cors(corsOptions), async (req, res) => {
         try {
             // Validate input data
             const validatedData = insertNewsletterSchema.parse(req.body);

@@ -46,7 +46,7 @@ export async function setupVite(app, server) {
     }
     const viteServer = await createServer({
         root: frontendDir,
-        configFile: path.resolve(__dirname, "../../frontend/vite.config.ts"),
+        // configFile: path.resolve(__dirname, "../../frontend/vite.config.ts"),
         server: {
             middlewareMode: true,
             hmr: { server },
